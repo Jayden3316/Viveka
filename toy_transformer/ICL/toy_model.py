@@ -14,6 +14,119 @@ from transformer_lens import HookedTransformer, HookedTransformerConfig
 from transformer_lens.train import HookedTransformerTrainConfig
 from metrics import MetricsConfig, generate_prefix_matching_data, compute_metrics
 from mealymarkov import MarkovMealyModel
+import numpy as np
+from typing import List, Optional, Tuple
+import numpy as np
+from typing import List, Optional, Tuple
+import scipy
+
+class ParallelMarkovGeneratorGPU:
+    """
+    Generates Markov sequences in a fully parallelized batch on a GPU.
+    """
+    def __init__(self, n_states: int,n_gen:int, gen_len:int, d_vocab: int, T_list: list[np.ndarray], 
+                 eta0: Optional[np.ndarray] = None, device: str = 'cuda', seed:int=42 ):
+        
+        if not torch.cuda.is_available() and device == 'cuda':
+            print("CUDA not available, falling back to CPU. Performance will be slower.")
+            device = 'cpu'
+        self.device = torch.device(device)
+        self.n_gen=n_gen
+        self.gen_len=gen_len
+        self.seed=seed
+        self.n_states = n_states
+        self.d_vocab = d_vocab
+        
+        # Stack T_list into a single tensor of shape (V, n, n) and move to GPU
+        self.T_stack = torch.tensor(np.array(T_list), dtype=torch.float32).to(self.device)
+
+        # Prepare initial state eta0
+        if eta0 is None:
+            eta0 = np.full((self.n_states,), 1.0 / self.n_states)
+        self.eta0 = torch.tensor(eta0, dtype=torch.float32).to(self.device)
+        
+        self.data=[]
+        self.states=[]
+        self.generate_batch()
+    def generate_batch(self):
+        """
+        Generates a batch of n_gen sequences, each of length gen_len.
+        
+        Returns:
+            torch.Tensor: A tensor of token indices with shape (n_gen, gen_len).
+        """
+        # Initialize the states for the entire batch
+        # Shape: (n_gen, n_states)
+        n_gen, gen_len = self.n_gen, self.gen_len
+        eta_batch = self.eta0.expand(n_gen, -1)
+        g = torch.Generator(device=self.device)
+        g.manual_seed(self.seed)
+
+        # List to store the generated tokens for each step
+        generated_tokens = []
+        generated_probs = []
+        generated_states=[]
+        generated_states.append(eta_batch.cpu())
+
+        for _ in range(gen_len):
+            # --- 1. Calculate token probabilities for the entire batch ---
+            # We use einsum for a clear and efficient batched matrix multiplication.
+            # 'bi,vij->bvj' means: for each item 'b' in the batch and each vocab item 'v',
+            # multiply state (bi) with matrix (vij) to get the next unnormalized state (bvj).
+            # eta_batch shape:      (n_gen, n_states)
+            # self.T_stack shape: (d_vocab, n_states, n_states)
+            unnorm_next_eta_batch = torch.einsum('bi,vij->bvj', eta_batch, self.T_stack)
+            
+            # Sum over the last dimension (j) to get token probabilities
+            # Shape: (n_gen, d_vocab)
+            p_batch = unnorm_next_eta_batch.sum(dim=-1)
+            #p_batch=p_batch/(p_batch.sum(dim=-1,keepdim=True)) # Normalize to get probabilities, add epsilon for stability
+            
+            # --- 2. Sample the next token for the entire batch ---
+            # torch.multinomial samples from the distributions in p_batch
+            # Shape: (n_gen, 1)
+            next_token_batch = torch.multinomial(p_batch, num_samples=1,generator=g)
+            generated_tokens.append(next_token_batch.cpu())
+            generated_probs.append(p_batch.view(n_gen, 1, self.d_vocab).cpu())
+            
+            # --- 3. Evolve the state for the entire batch ---
+            # Get the specific unnormalized next state that corresponds to the chosen token
+            # This is a highly efficient way to select the right T^k for each item in the batch
+            # Shape: (n_gen, n_states)
+            next_eta_numer = torch.gather(
+                unnorm_next_eta_batch, 
+                1, 
+                next_token_batch.unsqueeze(-1).expand(-1, -1, self.n_states)
+            ).squeeze(1)
+
+            # Normalize to get the next state distribution
+            next_eta_denom = next_eta_numer.sum(dim=-1, keepdim=True)
+            eta_batch = next_eta_numer / (next_eta_denom) # Add epsilon for stability
+            del next_eta_denom, next_eta_numer, p_batch, next_token_batch, unnorm_next_eta_batch
+            generated_states.append(eta_batch.cpu())
+
+        token_tensor=torch.stack(generated_tokens).squeeze(-1).T 
+        state_tensor=torch.stack(generated_states).permute(1,0,2)  
+
+        self.data = [token_tensor[i].to(self.device) for i in range(self.n_gen)]
+        self.states = [
+        [arr for arr in seq.cpu().numpy().astype(float)]
+        for seq in state_tensor]
+    def __len__(self):
+            return len(self.data)
+
+    def __getitem__(self, idx):
+            return {"tokens": self.data[idx]}
+
+    def to(self, device):
+            if str(device) != str(self.device):
+                self.data = [tensor.to(device) for tensor in self.data]
+                self.device = torch.device(device)
+            return self
+
+    def get_stacked_data(self):
+            return torch.stack(self.data)
+
 
 class MarkovData(Dataset):
 
