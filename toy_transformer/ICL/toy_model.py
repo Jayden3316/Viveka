@@ -2,18 +2,249 @@
 import os
 
 import numpy as np
-
+import pandas as pd
+import datashader as ds
+import datashader.transfer_functions as tf
 import torch
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 import wandb
-from typing import Optional, Literal
+from matplotlib import pyplot as plt
+from PIL import Image
+from matplotlib.figure import Figure
 
+from jaxtyping import Float
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 from transformer_lens.train import HookedTransformerTrainConfig
 from metrics import MetricsConfig, generate_prefix_matching_data, compute_metrics
 from mealymarkov import MarkovMealyModel
+from typing import List, Optional, Tuple
+import scipy
+from sklearn.linear_model import LinearRegression
+
+def run_activation_to_beliefs_regression(activations, ground_truth_beliefs):
+
+    # make sure the first two dimensions are the same
+    assert activations.shape[0] == ground_truth_beliefs.shape[0]
+    assert activations.shape[1] == ground_truth_beliefs.shape[1]
+
+    # flatten the activations
+    batch_size, n_ctx, d_model = activations.shape
+    belief_dim = ground_truth_beliefs.shape[-1]
+    activations_flattened = activations.reshape(-1, d_model)  # [batch * n_ctx, d_model]
+    ground_truth_beliefs_flattened = ground_truth_beliefs.reshape(
+        -1, belief_dim
+    )  # [batch * n_ctx, belief_dim]
+
+    # run the regression
+    regression = LinearRegression()
+    regression.fit(activations_flattened, ground_truth_beliefs_flattened)
+
+    # get the belief predictions
+    belief_predictions = regression.predict(
+        activations_flattened
+    )  # [batch * n_ctx, belief_dim]
+    belief_predictions = belief_predictions.reshape(batch_size, n_ctx, belief_dim)
+
+    return regression, belief_predictions
+
+
+def _project_to_simplex(points:np.ndarray):
+    """Project points onto the 2-simplex (equilateral triangle in 2D)."""
+    x = points[:, 1] + 0.5 * points[:, 2]
+    y = (np.sqrt(3) / 2) * points[:, 2]
+    return x, y
+
+# Combine aggregated channels into RGB images
+def _combine_channels_to_rgb(agg_r, agg_g, agg_b, px:int):
+    img_r = tf.shade(agg_r, cmap=['black', 'red'], how='linear')
+    img_g = tf.shade(agg_g, cmap=['black', 'green'], how='linear')
+    img_b = tf.shade(agg_b, cmap=['black', 'blue'], how='linear')
+
+    img_r = tf.spread(img_r, px=px, shape='circle')
+    img_g = tf.spread(img_g, px=px, shape='circle')
+    img_b = tf.spread(img_b, px=px, shape='circle')
+
+    # Combine using numpyß
+    r_array = np.array(img_r.to_pil()).astype(np.float64)
+    g_array = np.array(img_g.to_pil()).astype(np.float64)
+    b_array = np.array(img_b.to_pil()).astype(np.float64)
+
+    
+    # Stack arrays into an RGB image (ignoring alpha channel for simplicity)
+    rgb_image = np.stack([r_array[:,:,0], g_array[:,:,1], b_array[:,:,2]], axis=-1)
+    
+    return Image.fromarray(np.uint8(rgb_image))
+
+# TODO: I changed up the code for this to something which makes sense to me (creating panda dataframes from ground truth and predicted simplex. Check to see if this is what should actually be done)
+def plot_ground_truth_and_evaluated_2d_simplex(
+    ground_truth_tensor: np.ndarray, 
+    predicted_beliefs: np.ndarray, 
+    plot_triangles: bool,
+    facecolor: Literal['black', 'white'],
+    px: int
+) -> Figure:
+    # Projection and DataFrame preparation
+    ground_truth_tensor=ground_truth_tensor.reshape(-1,ground_truth_tensor.shape[-1])
+    print(ground_truth_tensor.shape)
+    bs_x, bs_y = _project_to_simplex(np.array(ground_truth_tensor))
+    bs_x, bs_y = np.ravel(bs_x), np.ravel(bs_y)
+    print("bs_x shape:", np.shape(bs_x))
+    print("bs_y shape:", np.shape(bs_y))
+    print("ground_truth_tensor shape:", np.shape(ground_truth_tensor))
+   #ground_truth_tensor=ground_truth_tensor.reshape(-1,ground_truth_tensor.shape[-1])
+    ground_truth_data_frame = pd.DataFrame({'x': bs_x, 'y': bs_y, 'r': ground_truth_tensor[:, 0], 'g': ground_truth_tensor[:, 1], 'b': ground_truth_tensor[:, 2]})
+    predicted_beliefs=predicted_beliefs.reshape(-1,predicted_beliefs.shape[-1])
+    print(predicted_beliefs.shape)
+    pb_x, pb_y = _project_to_simplex(np.array(predicted_beliefs))
+    pb_x, pb_y = np.ravel(pb_x), np.ravel(pb_y)
+    print("pb_x shape:", np.shape(pb_x))
+    print("pb_y shape:", np.shape(pb_y))
+    print("predicted_belief shape:", np.shape(predicted_beliefs))
+    predicted_belief_vector_data_frame = pd.DataFrame({'x': pb_x, 'y': pb_y, 'r': ground_truth_tensor[:, 0], 'g': ground_truth_tensor[:, 1], 'b': ground_truth_tensor[:, 2]})
+
+    # Create canvas
+    canvas = ds.Canvas(plot_width=1000, plot_height=1000, x_range=(-0.1, 1.1), y_range=(-0.1, np.sqrt(3)/2 + 0.1))
+    
+    # Aggregate each RGB channel separately for ground truth and predicted beliefs
+    colours = ['r', 'g', 'b']
+    ground_truth_aggregated = {color: canvas.points(ground_truth_data_frame, 'x', 'y', ds.mean(color)) for color in colours}
+    predicted_belief_vector_aggregated = {color: canvas.points(predicted_belief_vector_data_frame, 'x', 'y', ds.mean(color)) for color in colours}
+
+    img_gt = _combine_channels_to_rgb(ground_truth_aggregated['r'], ground_truth_aggregated['g'], ground_truth_aggregated['b'], px=2*px)
+    img_pb = _combine_channels_to_rgb(predicted_belief_vector_aggregated['r'], predicted_belief_vector_aggregated['g'], predicted_belief_vector_aggregated['b'], px=px)
+
+    # Visualization with Matplotlib
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5), sharex=True, sharey=True, facecolor=facecolor)
+    for ax in axs:
+        ax.tick_params(axis='x', colors=facecolor)  
+        ax.tick_params(axis='y', colors=facecolor)  
+        ax.xaxis.label.set_color(facecolor)  
+        ax.yaxis.label.set_color(facecolor)  
+        ax.title.set_color(facecolor)
+    axs[0].imshow(img_gt)
+    axs[1].imshow(img_pb)
+    
+    axs[0].axis('off')
+    axs[1].axis('off')
+    title_y_position = -0.1  # Adjust this value to move the title up or down relative to the axes
+    fig.text(0.5, title_y_position, 'Ground Truth', ha='center', va='top', transform=axs[0].transAxes, color='white', fontsize=15)  # Changed 'black' to 'white'
+    fig.text(0.5, title_y_position, 'Residual Stream', ha='center', va='top', transform=axs[1].transAxes, color='white', fontsize=15)  # Changed 'black' to 'white'
+
+    if plot_triangles:
+        for ax in axs:
+            ax.plot([0, 0.5, 1, 0], [0, np.sqrt(3)/2, 0, 0], 'white', lw=2)  # Changed 'black' to 'white'
+
+    return fig    
+
+class ParallelMarkovGeneratorGPU:
+    """
+    Generates Markov sequences in a fully parallelized batch on a GPU.
+    """
+    def __init__(self, n_states: int,n_gen:int, gen_len:int, d_vocab: int, T_list: list[np.ndarray], 
+                 eta0: Optional[np.ndarray] = None, device: str = 'cuda', seed:int=42 ):
+        
+        if not torch.cuda.is_available() and device == 'cuda':
+            print("CUDA not available, falling back to CPU. Performance will be slower.")
+            device = 'cpu'
+        self.device = torch.device(device)
+        self.n_gen=n_gen
+        self.gen_len=gen_len
+        self.seed=seed
+        self.n_states = n_states
+        self.d_vocab = d_vocab
+        
+        # Stack T_list into a single tensor of shape (V, n, n) and move to GPU
+        self.T_stack = torch.tensor(np.array(T_list), dtype=torch.float32).to(self.device)
+
+        # Prepare initial state eta0
+        if eta0 is None:
+            eta0 = np.full((self.n_states,), 1.0 / self.n_states)
+        self.eta0 = torch.tensor(eta0, dtype=torch.float32).to(self.device)
+        
+        self.data=[]
+        self.states=[]
+        self.generate_batch()
+    def generate_batch(self):
+        """
+        Generates a batch of n_gen sequences, each of length gen_len.
+        
+        Returns:
+            torch.Tensor: A tensor of token indices with shape (n_gen, gen_len).
+        """
+        # Initialize the states for the entire batch
+        # Shape: (n_gen, n_states)
+        n_gen, gen_len = self.n_gen, self.gen_len
+        eta_batch = self.eta0.expand(n_gen, -1)
+        g = torch.Generator(device=self.device)
+        g.manual_seed(self.seed)
+
+        # List to store the generated tokens for each step
+        generated_tokens = []
+        generated_probs = []
+        generated_states=[]
+        generated_states.append(eta_batch.cpu())
+
+        for _ in range(gen_len):
+            # --- 1. Calculate token probabilities for the entire batch ---
+            # We use einsum for a clear and efficient batched matrix multiplication.
+            # 'bi,vij->bvj' means: for each item 'b' in the batch and each vocab item 'v',
+            # multiply state (bi) with matrix (vij) to get the next unnormalized state (bvj).
+            # eta_batch shape:      (n_gen, n_states)
+            # self.T_stack shape: (d_vocab, n_states, n_states)
+            unnorm_next_eta_batch = torch.einsum('bi,vij->bvj', eta_batch, self.T_stack)
+            
+            # Sum over the last dimension (j) to get token probabilities
+            # Shape: (n_gen, d_vocab)
+            p_batch = unnorm_next_eta_batch.sum(dim=-1)
+            #p_batch=p_batch/(p_batch.sum(dim=-1,keepdim=True)) # Normalize to get probabilities, add epsilon for stability
+            
+            # --- 2. Sample the next token for the entire batch ---
+            # torch.multinomial samples from the distributions in p_batch
+            # Shape: (n_gen, 1)
+            next_token_batch = torch.multinomial(p_batch, num_samples=1,generator=g)
+            generated_tokens.append(next_token_batch.cpu())
+            generated_probs.append(p_batch.view(n_gen, 1, self.d_vocab).cpu())
+            
+            # --- 3. Evolve the state for the entire batch ---
+            # Get the specific unnormalized next state that corresponds to the chosen token
+            # This is a highly efficient way to select the right T^k for each item in the batch
+            # Shape: (n_gen, n_states)
+            next_eta_numer = torch.gather(
+                unnorm_next_eta_batch, 
+                1, 
+                next_token_batch.unsqueeze(-1).expand(-1, -1, self.n_states)
+            ).squeeze(1)
+
+            # Normalize to get the next state distribution
+            next_eta_denom = next_eta_numer.sum(dim=-1, keepdim=True)
+            eta_batch = next_eta_numer / (next_eta_denom) # Add epsilon for stability
+            del next_eta_denom, next_eta_numer, p_batch, next_token_batch, unnorm_next_eta_batch
+            generated_states.append(eta_batch.cpu())
+
+        token_tensor=torch.stack(generated_tokens).squeeze(-1).T 
+        state_tensor=torch.stack(generated_states).permute(1,0,2)  
+
+        self.data = [token_tensor[i].to(self.device) for i in range(self.n_gen)]
+        self.states = [
+        [arr for arr in seq.cpu().numpy().astype(float)]
+        for seq in state_tensor]
+    def __len__(self):
+            return len(self.data)
+
+    def __getitem__(self, idx):
+            return {"tokens": self.data[idx]}
+
+    def to(self, device):
+            if str(device) != str(self.device):
+                self.data = [tensor.to(device) for tensor in self.data]
+                self.device = torch.device(device)
+            return self
+
+    def get_stacked_data(self):
+            return torch.stack(self.data)
+
 
 class MarkovData(Dataset):
 
