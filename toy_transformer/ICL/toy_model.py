@@ -19,7 +19,7 @@ from transformer_lens import HookedTransformer, HookedTransformerConfig
 from transformer_lens.train import HookedTransformerTrainConfig
 from metrics import MetricsConfig, generate_prefix_matching_data, compute_metrics
 from mealymarkov import MarkovMealyModel
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple,Literal
 import scipy
 from sklearn.linear_model import LinearRegression
 
