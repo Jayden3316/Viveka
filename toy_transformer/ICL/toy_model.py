@@ -292,69 +292,127 @@ class MarkovData(Dataset):
         return torch.stack(self.data)
 
 
+# class MergeMarkovDatasets(Dataset):
+#     """
+#     Merges two MarkovData objects and returns a new Dataset object.
+
+#     Mixing style is the manner in which the datasets should be merged:
+#     - "random": Generations from both the datasets are randomly mixed.
+#     - "alternate": The new dataset has generations alternating from both the datasets.
+#     - "stack": Generations of the second dataset are added after generations of the first dataset.
+
+#     Note that `mixing_style` may play an important role in training of the model.
+#     """
+
+#     def __init__(
+#         self, 
+#         dataset1: MarkovData, 
+#         dataset2: MarkovData, 
+#         mixing_style: Literal["random", "alternate", "stack"]
+#     ):
+#         self.model1 = dataset1.model
+#         self.model2 = dataset2.model
+
+#         assert dataset1.d_vocab == dataset2.d_vocab, "Vocabulary size for the datasets does not match"
+#         self.d_vocab = dataset1.d_vocab
+
+#         assert dataset1.gen_len == dataset2.gen_len, "Generation lengths for the datasets do not match"
+#         self.gen_len = dataset1.gen_len
+
+#         if dataset1.device != dataset2.device:
+#             dataset2.to(dataset1.device)
+#         self.device = dataset1.device
+
+#         data1 = list(zip(dataset1.data, dataset1.states))
+#         data2 = list(zip(dataset2.data, dataset2.states))
+
+#         if mixing_style == "random":
+#             merged = data1 + data2
+#             np.random.shuffle(merged)
+#         elif mixing_style == "alternate":
+#             assert len(data1) == len(data2), "Mixing style 'alternate' is valid only when the size of both datasets is same"
+#             merged = []
+#             for i in range(len(data1)):
+#                 merged.append(data1[i])
+#                 merged.append(data2[i])
+#         else:
+#             merged = data1 + data2
+
+#         self.data = [d for d, s in merged]
+#         self.states = [s for d, s in merged]
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         return {"tokens": self.data[idx]}
+
+#     def to(self,device):
+#         if device!=self.device:
+#             self.data = [tensor.to(device) for tensor in self.data]
+#             self.device=device
+#         return self
+
+#     def get_stacked_data(self):
+#         return torch.stack(self.data)    
 class MergeMarkovDatasets(Dataset):
     """
     Merges two MarkovData objects and returns a new Dataset object.
 
-    Mixing style is the manner in which the datasets should be merged:
-    - "random": Generations from both the datasets are randomly mixed.
-    - "alternate": The new dataset has generations alternating from both the datasets.
-    - "stack": Generations of the second dataset are added after generations of the first dataset.
+    Mixing style is the manner in which the datasets should be merged.
+    `'random'` : Generations from both the datasets are randomly mixed.
+    `'alternate'` : The new dataset has generations alternating from both the datasets.
+    `'stack'` : Generations of the second dataset are added after generations of the first dataset.
 
-    Note that `mixing_style` may play an important role in training of the model.
+    Note that mixing_style may play an important role in training of the model.
     """
-
     def __init__(
-        self, 
-        dataset1: MarkovData, 
-        dataset2: MarkovData, 
-        mixing_style: Literal["random", "alternate", "stack"]
-    ):
-        self.model1 = dataset1.model
-        self.model2 = dataset2.model
-
-        assert dataset1.d_vocab == dataset2.d_vocab, "Vocabulary size for the datasets does not match"
+        self,
+        dataset1: Dataset,
+        dataset2: Dataset,
+        mixing_style: Literal['random', 'alternate', 'stack']
+        ):
+        self.model1 = getattr(dataset1, 'model', dataset1)
+        self.model2 = getattr(dataset2, 'model', dataset2)
+        assert dataset1.d_vocab == dataset2.d_vocab, 'Vocabulary size for the datasets does not match'
         self.d_vocab = dataset1.d_vocab
-
-        assert dataset1.gen_len == dataset2.gen_len, "Generation lengths for the datasets do not match"
+        assert dataset1.gen_len == dataset2.gen_len, 'Generations lengths for the datasets do not match'
         self.gen_len = dataset1.gen_len
-
-        if dataset1.device != dataset2.device:
+        if getattr(dataset1,'device','cpu')!=getattr(dataset2,'device','cpu'):
             dataset2.to(dataset1.device)
-        self.device = dataset1.device
+        self.device=getattr(dataset1,'device','cpu')
 
         data1 = list(zip(dataset1.data, dataset1.states))
         data2 = list(zip(dataset2.data, dataset2.states))
 
-        if mixing_style == "random":
+        if mixing_style == 'random':
             merged = data1 + data2
             np.random.shuffle(merged)
-        elif mixing_style == "alternate":
-            assert len(data1) == len(data2), "Mixing style 'alternate' is valid only when the size of both datasets is same"
+        elif mixing_style == 'alternate':
+            assert len(data1) == len(data2), 'Mixing style \'alternate\' is valid only when the size of both datasets is same'
             merged = []
             for i in range(len(data1)):
                 merged.append(data1[i])
                 merged.append(data2[i])
         else:
             merged = data1 + data2
-
+        
         self.data = [d for d, s in merged]
         self.states = [s for d, s in merged]
 
     def __len__(self):
         return len(self.data)
-
+    
     def __getitem__(self, idx):
-        return {"tokens": self.data[idx]}
-
-    def to(self,device):
-        if device!=self.device:
+        return {'tokens': self.data[idx]}
+    
+    def to(self, device):
+        if str(device) != str(self.device):
             self.data = [tensor.to(device) for tensor in self.data]
-            self.device=device
+            self.device = torch.device(device)
         return self
-
     def get_stacked_data(self):
-        return torch.stack(self.data)    
+        return torch.stack(self.data)
 
 
 def train(
