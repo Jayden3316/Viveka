@@ -38,6 +38,7 @@ attention_probing/
 ├── configs/
 │   ├── model_config.yaml
 │   ├── training_config.yaml
+│   ├── generation_config.yaml
 │   └── data_config.yaml
 ├── checkpoints/
 ├── src/
@@ -46,6 +47,7 @@ attention_probing/
 │   ├── data.py
 │   ├── uncertainty.py
 │   ├── train.py
+│   ├── generate.py
 │   ├── inference.py
 │   ├── utils.py
 │   └── visualization.py
@@ -78,4 +80,16 @@ python main.py analyze \
     --checkpoint checkpoints/best_model.pt \
     --questions-file data/test_questions.json \
     --output results/layer_analysis.json
+```
+#### Generate samples from base models
+Generate completions using standard models (without probe tokens) on datasets like TriviaQA, PopQA, etc. results are saved to JSON.
+
+**Run for a specific model:**
+```bash
+python src/generate.py --config configs/generation_config.yaml --model llama-3.1-8b-instruct
+```
+
+**Run for all models in config:**
+```bash
+python src/generate.py --config configs/generation_config.yaml --all
 ```

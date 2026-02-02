@@ -1,0 +1,15 @@
+
+models:
+  test-model: "fake/model"
+
+datasets:
+  - name: "triviaqa"
+    num_samples: 2
+
+generation_params:
+  max_new_tokens: 10
+  num_generations: 1
+
+batch_size: 2
+output_dir: "tests_manual/outputs"
+            

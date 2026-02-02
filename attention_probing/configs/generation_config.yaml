@@ -1,0 +1,31 @@
+# Generation configuration
+
+# Models to evaluate
+# Key: friendly identifier, Value: HuggingFace model path
+models:
+  gemma-2-2b-it: "google/gemma-2-2b-it"
+  qwen-2.5-3b-instruct: "Qwen/Qwen2.5-3B-Instruct"
+  llama-3.1-8b-instruct: "meta-llama/Llama-3.1-8B-Instruct"
+  llama-3.2-3b-instruct: "meta-llama/Llama-3.2-3B-Instruct"
+  
+
+# Datasets to generate for
+datasets:
+  - name: "triviaqa"
+    num_samples: 3200
+
+# Generation parameters
+generation_params:
+  max_new_tokens: 50
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  num_generations: 32
+  do_sample: true
+
+# System prompt
+system_prompt: "Answer the following question concisely."
+
+# Execution settings
+batch_size: 4
+output_dir: "./generations"
