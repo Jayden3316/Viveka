@@ -24,7 +24,7 @@ generation_params:
   do_sample: true
 
 # System prompt
-system_prompt: "Answer the following question concisely."
+system_prompt: "Answer the following questions to the best of your ability. In case you are unsure of the answer, respond with 'I don't know'."
 
 # Execution settings
 batch_size: 4
