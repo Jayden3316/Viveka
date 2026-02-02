@@ -36,8 +36,7 @@ class GenerationDataset(Dataset):
         # Apply chat template if available, otherwise manual formatting
         if self.tokenizer.chat_template:
             messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": question}
+                {"role": "user", "content": f"{self.system_prompt}\n{question}"}
             ]
             prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         else:
