@@ -22,10 +22,11 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[^\w\-_]', '_', name)
 
 class GenerationDataset(Dataset):
-    def __init__(self, questions: List[str], tokenizer, system_prompt: str):
+    def __init__(self, questions: List[str], tokenizer, system_prompt: str, template_kwargs: Dict = None):
         self.questions = questions
         self.tokenizer = tokenizer
         self.system_prompt = system_prompt
+        self.template_kwargs = template_kwargs or {}
         
     def __len__(self):
         return len(self.questions)
@@ -38,7 +39,12 @@ class GenerationDataset(Dataset):
             messages = [
                 {"role": "user", "content": f"{self.system_prompt}\n{question}"}
             ]
-            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            prompt = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True,
+                **self.template_kwargs
+            )
         else:
             # Fallback for models without chat template
             prompt = f"{self.system_prompt}\n\nQuestion: {question}\nAnswer:"
@@ -126,8 +132,24 @@ def main():
                 print(f"Error loading dataset {dataset_name}: {e}")
                 continue
 
+            # Check if tokenizer supports 'thinking' argument (for reasoning models)
+            template_kwargs = {}
+            if tokenizer.chat_template:
+                try:
+                    # quick check with dummy input
+                    tokenizer.apply_chat_template(
+                        [{"role": "user", "content": "test"}], 
+                        tokenize=False, 
+                        enable_thinking=config.get(enable_thinking)
+                    )
+                    template_kwargs["enable_thinking"] = False
+                    print(f"Enabled 'enable_thinking=False' for {model_key}")
+                except Exception:
+                    # Does not support 'thinking' argument
+                    pass
+
             # Create dataloader
-            dataset = GenerationDataset(questions, tokenizer, system_prompt)
+            dataset = GenerationDataset(questions, tokenizer, system_prompt, template_kwargs)
             dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
             
             results = []
